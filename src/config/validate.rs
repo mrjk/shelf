@@ -82,6 +82,9 @@ fn check_globs(profile: &Profile, errors: &mut Vec<ValidationError>) {
         if let Some(patterns) = &out.match_ {
             check(patterns, format!("output.{}.match", out.name));
         }
+        if let Some(patterns) = &out.match_dir {
+            check(patterns, format!("output.{}.match_dir", out.name));
+        }
     }
 }
 

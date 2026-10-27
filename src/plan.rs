@@ -177,7 +177,13 @@ pub fn plan(
             .then_with(|| a.file.absolute_path.cmp(&b.file.absolute_path))
     });
 
-    let match_sets = compile_match_sets(&profile.outputs)?;
+    let match_sets = compile_glob_sets(&profile.outputs, |o| o.match_.as_deref())?;
+    // An empty `match` still becomes a set that matches nothing. An empty
+    // `match_dir` is omitted so it accepts every directory.
+    let match_dir_sets = compile_glob_sets(&profile.outputs, |o| match o.match_dir.as_deref() {
+        Some(patterns) if !patterns.is_empty() => Some(patterns),
+        _ => None,
+    })?;
 
     // In-batch state: peeked seqs are not reserved, so the planner tracks
     // per-bucket counters and claimed paths locally for the lifetime of this call.
@@ -194,6 +200,7 @@ pub fn plan(
             profile,
             &ready_file,
             &match_sets,
+            &match_dir_sets,
             &mut bucket_next,
             &mut claimed_paths,
             &mut placed_in_batch,
@@ -335,6 +342,7 @@ fn plan_one(
     profile: &Profile,
     ready: &ReadyFile,
     match_sets: &BTreeMap<String, GlobSet>,
+    match_dir_sets: &BTreeMap<String, GlobSet>,
     bucket_next: &mut BTreeMap<(String, String), u64>,
     claimed_paths: &mut BTreeSet<(String, PathBuf)>,
     placed_in_batch: &mut BTreeMap<(String, String), PathBuf>,
@@ -352,7 +360,7 @@ fn plan_one(
     }
 
     for output in &profile.outputs {
-        if !output_accepts(output, ready, match_sets) {
+        if !output_accepts(output, ready, match_sets, match_dir_sets) {
             continue;
         }
         routed = true;
@@ -548,6 +556,7 @@ fn output_accepts(
     output: &Output,
     ready: &ReadyFile,
     match_sets: &BTreeMap<String, GlobSet>,
+    match_dir_sets: &BTreeMap<String, GlobSet>,
 ) -> bool {
     if let Some(kinds) = &output.kinds
         && !kinds.iter().any(|k| k == &ready.metadata.kind)
@@ -565,13 +574,33 @@ fn output_accepts(
             return false;
         }
     }
+    if let Some(set) = match_dir_sets.get(&output.name) {
+        let dir = relative_dir(&ready.file);
+        if !set.is_match(&dir) {
+            return false;
+        }
+    }
     true
 }
 
-fn compile_match_sets(outputs: &[Output]) -> Result<BTreeMap<String, GlobSet>> {
+/// Parent of `relative_path`, or `""` when the file sits in the input root.
+fn relative_dir(file: &ScannedFile) -> String {
+    file.relative_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn compile_glob_sets<'a>(
+    outputs: &'a [Output],
+    patterns_of: impl Fn(&'a Output) -> Option<&'a [String]>,
+) -> Result<BTreeMap<String, GlobSet>> {
     let mut out = BTreeMap::new();
     for o in outputs {
-        let Some(patterns) = &o.match_ else { continue };
+        let Some(patterns) = patterns_of(o) else {
+            continue;
+        };
         let mut b = GlobSetBuilder::new();
         for p in patterns {
             let g = Glob::new(p).map_err(|source| Error::BadGlob {
@@ -946,10 +975,11 @@ kinds = ["video"]
 "#,
         )
         .unwrap();
-        assert!(!output_accepts(&output, &ready, &BTreeMap::new()));
+        let no_globs = BTreeMap::new();
+        assert!(!output_accepts(&output, &ready, &no_globs, &no_globs));
         output.kinds = Some(vec!["photo".to_string()]);
-        assert!(output_accepts(&output, &ready, &BTreeMap::new()));
+        assert!(output_accepts(&output, &ready, &no_globs, &no_globs));
         output.kinds = None;
-        assert!(output_accepts(&output, &ready, &BTreeMap::new()));
+        assert!(output_accepts(&output, &ready, &no_globs, &no_globs));
     }
 }
