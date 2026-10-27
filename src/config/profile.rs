@@ -216,6 +216,10 @@ pub struct Output {
     #[serde(default, rename = "match")]
     pub match_: Option<Vec<String>>,
 
+    /// Directory globs relative to the input root. `None` or empty accepts any directory.
+    #[serde(default)]
+    pub match_dir: Option<Vec<String>>,
+
     /// `kind -> directory template` overrides.
     #[serde(default)]
     pub directory_for: BTreeMap<String, String>,
@@ -399,6 +403,7 @@ filename  = "{yyyy}-{mm}-{dd}_{author}_{seq:04}"
         assert!(o.filename_for.is_empty());
         assert!(o.kinds.is_none());
         assert!(o.match_.is_none());
+        assert!(o.match_dir.is_none());
         assert!(o.preserve_mtime, "preserve_mtime defaults to true");
     }
 

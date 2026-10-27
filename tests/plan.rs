@@ -293,6 +293,113 @@ match = ["img_*"]
     assert!(places.contains(&("img_001.jpg", "photos")));
 }
 
+fn match_dir_profile(out: &Path, match_dir: &str) -> Profile {
+    let toml_src = format!(
+        r#"
+inputs = ["/tmp/i"]
+
+[kinds]
+photo = ["jpg"]
+
+[metadata]
+date_sources = ["exif:DateTimeOriginal", "mtime"]
+
+[sequence]
+scope = "day"
+
+[dedupe]
+strategy = "sha256"
+on_duplicate = "skip"
+scope = "output"
+
+[[output]]
+name = "lib"
+path = "{}"
+mode = "copy"
+directory = "{{yyyy}}"
+filename  = "{{yyyy}}-{{mm}}-{{dd}}_{{seq:05}}"
+{match_dir}
+"#,
+        out.display(),
+    );
+    toml::from_str(&toml_src).unwrap()
+}
+
+/// Place the given relative paths and return which were placed vs unrouted.
+fn route_match_dir(match_dir: &str, rels: &[&str]) -> (Vec<String>, Vec<String>) {
+    let tmp = TempDir::new().unwrap();
+    let in_dir = tmp.path().join("in");
+    let out = tmp.path().join("o");
+    fs::create_dir_all(&in_dir).unwrap();
+
+    let mut candidates = Vec::new();
+    for (i, rel) in rels.iter().enumerate() {
+        let path = in_dir.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let date = format!("2024:03:{:02} 12:00:00", i + 1);
+        let name = path.file_name().unwrap().to_str().unwrap();
+        write_file(
+            path.parent().unwrap(),
+            name,
+            &exif_jpeg(&date),
+            (i as i64) + 1,
+        );
+        candidates.push(Ok(scanned(&in_dir, rel)));
+    }
+
+    let profile = match_dir_profile(&out, match_dir);
+    let mut state = State::open_in_memory().unwrap();
+    let plan = plan(&mut state, &profile, candidates.into_iter(), None).unwrap();
+
+    let placed = rels
+        .iter()
+        .filter(|rel| {
+            plan.actions.iter().any(|a| match a {
+                PlannedAction::Place { src, .. } => src.ends_with(rel),
+                _ => false,
+            })
+        })
+        .map(|rel| (*rel).to_string())
+        .collect();
+    let unrouted = rels
+        .iter()
+        .filter(|rel| {
+            plan.health
+                .iter()
+                .any(|h| h.kind == HealthKind::Unrouted && h.path.ends_with(rel))
+        })
+        .map(|rel| (*rel).to_string())
+        .collect();
+    (placed, unrouted)
+}
+
+#[test]
+fn match_dir_exact_accepts_only_that_directory() {
+    let (placed, unrouted) = route_match_dir(
+        r#"match_dir = ["bnc"]"#,
+        &["bnc/a.jpg", "bnc/2024/a.jpg", "other/a.jpg"],
+    );
+    assert_eq!(placed, vec!["bnc/a.jpg"]);
+    assert_eq!(unrouted, vec!["bnc/2024/a.jpg", "other/a.jpg"]);
+}
+
+#[test]
+fn match_dir_descendant_glob_skips_the_directory_itself() {
+    let (placed, unrouted) = route_match_dir(
+        r#"match_dir = ["bnc/**"]"#,
+        &["bnc/a.jpg", "bnc/2024/a.jpg"],
+    );
+    assert_eq!(placed, vec!["bnc/2024/a.jpg"]);
+    assert_eq!(unrouted, vec!["bnc/a.jpg"]);
+}
+
+#[test]
+fn empty_match_dir_accepts_any_directory() {
+    let (placed, unrouted) = route_match_dir("match_dir = []", &["bnc/a.jpg", "other/a.jpg"]);
+    assert_eq!(placed, vec!["bnc/a.jpg", "other/a.jpg"]);
+    assert!(unrouted.is_empty());
+}
+
 #[test]
 fn unmatched_file_lands_in_health_as_unrouted() {
     let tmp = TempDir::new().unwrap();

@@ -34,7 +34,7 @@ $ARGUMENTS — if it names a workflow (e.g. "invoices", "photos"), use it as the
 ```toml
 inputs = ["/abs/path/one", "/abs/path/two"]      # required, at least one
 
-[filters]                                         # global, applies before per-output kinds/match
+[filters]                                         # global, applies before per-output kinds/match/match_dir
 include = ["*.jpg", "*.png"]                      # globs, empty = everything
 exclude = ["**/cache/**"]                         # applied after include
 
@@ -80,7 +80,8 @@ filename  = "{yyyy}-{mm}-{dd}_{seq:05}"           # template (no extension — a
 preserve_mtime = true                             # default true; stamp dst with src's mtime
 # optional per-output narrowing:
 # kinds = ["photo", "video"]
-# match = ["INVOICE_*.pdf"]
+# match = ["INVOICE_*.pdf"]             # filename only
+# match_dir = ["bnc", "bnc/**"]         # dir relative to each input; empty = any
 # optional per-kind template overrides:
 # [output.directory_for]
 # video = "{yyyy}/{mm}/videos"
@@ -234,6 +235,7 @@ filename  = "{yyyy}-{mm}-{dd}_{seq:04}"
 - **`mode = "move"`** is destructive. Default to `copy` unless the user has explicitly said "move". Re-confirm before writing the file.
 - **Absolute paths** only in `inputs` and `output.path`. Relative paths are ambiguous and untested.
 - **`exclude` patterns** match the path relative to each input root. `**/cache/**` excludes any `cache` folder anywhere; `cache/*` only excludes top-level.
+- **`match_dir`** globs the file's directory relative to the input root. `bnc` matches only files directly in `bnc/`. `bnc/**` matches descendants such as `bnc/2024/` and does not match `bnc` itself. List both to take the folder and everything under it. Omitted or `[]` accepts every directory. `match` still sees only the filename.
 - **One workflow per profile.** Don't try to combine "photos" and "invoices" in one — different extractors, different filename conventions. Make two files.
 - **State DB is per-profile.** Renaming the profile filename creates a fresh DB; the old one still sits at `~/.local/share/shelf/<old-name>.db`. Mention this if the user is renaming.
 - **`{seq}` resets per scope.** With `scope = "day"`, day boundaries reset the counter — re-running on the same day continues numbering, the next day starts at 1.
