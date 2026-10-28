@@ -376,27 +376,37 @@ fn route_match_dir(match_dir: &str, rels: &[&str]) -> (Vec<String>, Vec<String>)
 #[test]
 fn match_dir_exact_accepts_only_that_directory() {
     let (placed, unrouted) = route_match_dir(
-        r#"match_dir = ["bnc"]"#,
-        &["bnc/a.jpg", "bnc/2024/a.jpg", "other/a.jpg"],
+        r#"match_dir = ["bank2000"]"#,
+        &["bank2000/a.jpg", "bank2000/2024/a.jpg", "other/a.jpg"],
     );
-    assert_eq!(placed, vec!["bnc/a.jpg"]);
-    assert_eq!(unrouted, vec!["bnc/2024/a.jpg", "other/a.jpg"]);
+    assert_eq!(placed, vec!["bank2000/a.jpg"]);
+    assert_eq!(unrouted, vec!["bank2000/2024/a.jpg", "other/a.jpg"]);
+}
+
+#[test]
+fn match_dir_trailing_slash_is_stripped() {
+    let (placed, unrouted) = route_match_dir(
+        r#"match_dir = ["bank2000/"]"#,
+        &["bank2000/a.jpg", "bank2000/2024/a.jpg", "other/a.jpg"],
+    );
+    assert_eq!(placed, vec!["bank2000/a.jpg"]);
+    assert_eq!(unrouted, vec!["bank2000/2024/a.jpg", "other/a.jpg"]);
 }
 
 #[test]
 fn match_dir_descendant_glob_skips_the_directory_itself() {
     let (placed, unrouted) = route_match_dir(
-        r#"match_dir = ["bnc/**"]"#,
-        &["bnc/a.jpg", "bnc/2024/a.jpg"],
+        r#"match_dir = ["bank2000/**"]"#,
+        &["bank2000/a.jpg", "bank2000/2024/a.jpg"],
     );
-    assert_eq!(placed, vec!["bnc/2024/a.jpg"]);
-    assert_eq!(unrouted, vec!["bnc/a.jpg"]);
+    assert_eq!(placed, vec!["bank2000/2024/a.jpg"]);
+    assert_eq!(unrouted, vec!["bank2000/a.jpg"]);
 }
 
 #[test]
 fn empty_match_dir_accepts_any_directory() {
-    let (placed, unrouted) = route_match_dir("match_dir = []", &["bnc/a.jpg", "other/a.jpg"]);
-    assert_eq!(placed, vec!["bnc/a.jpg", "other/a.jpg"]);
+    let (placed, unrouted) = route_match_dir("match_dir = []", &["bank2000/a.jpg", "other/a.jpg"]);
+    assert_eq!(placed, vec!["bank2000/a.jpg", "other/a.jpg"]);
     assert!(unrouted.is_empty());
 }
 
@@ -1267,4 +1277,80 @@ fn snapshot_plan_for_small_fixture() {
     summary.sort();
 
     insta::assert_debug_snapshot!(summary);
+}
+
+#[test]
+fn kind_rule_var_overrides_fallback_in_directory() {
+    let tmp = TempDir::new().unwrap();
+    let in_dir = tmp.path().join("in");
+    let nested = in_dir.join("bank2000");
+    let out = tmp.path().join("out");
+    fs::create_dir_all(&nested).unwrap();
+
+    write_file(&in_dir, "loose.jpg", &exif_jpeg("2024:03:15 12:00:00"), 1);
+    write_file(&nested, "stmt.jpg", &exif_jpeg("2024:03:16 13:00:00"), 2);
+
+    let profile: Profile = toml::from_str(&format!(
+        r#"
+inputs = ["/tmp/i"]
+
+[kinds]
+photo = ["jpg"]
+
+[templates.fallbacks]
+bank = "unknown_bank"
+
+[[kind_rule]]
+kind = "statement"
+parent = ["bank2000"]
+vars.bank = "bank2000"
+
+[metadata]
+date_sources = ["exif:DateTimeOriginal", "mtime"]
+
+[sequence]
+scope = "day"
+
+[dedupe]
+strategy = "sha256"
+on_duplicate = "skip"
+
+[[output]]
+name = "lib"
+path = "{}"
+mode = "copy"
+on_conflict = "rename"
+directory = "{{bank}}/{{yyyy}}"
+filename = "{{yyyy}}-{{mm}}-{{dd}}_{{seq:05}}"
+"#,
+        out.display()
+    ))
+    .unwrap();
+
+    let mut state = State::open_in_memory().unwrap();
+    let candidates = vec![
+        Ok(scanned(&in_dir, "loose.jpg")),
+        Ok(ScannedFile {
+            source_root: in_dir.clone(),
+            absolute_path: nested.join("stmt.jpg"),
+            relative_path: PathBuf::from("bank2000/stmt.jpg"),
+        }),
+    ];
+    let plan = plan(&mut state, &profile, candidates.into_iter(), None).unwrap();
+    let dsts: Vec<String> = plan
+        .actions
+        .iter()
+        .filter_map(|a| match a {
+            PlannedAction::Place { dst, .. } => Some(dst.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        dsts.iter().any(|d| d.contains("bank2000/2024")),
+        "matched rule var, got {dsts:?}"
+    );
+    assert!(
+        dsts.iter().any(|d| d.contains("unknown_bank/2024")),
+        "fallback when no rule matches, got {dsts:?}"
+    );
 }

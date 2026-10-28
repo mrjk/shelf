@@ -44,7 +44,22 @@ heif = "heic"                                     #   tif→tiff, heif→heic, m
 tif  = "tiff"
 
 [kinds]                                           # canonical exts grouped by kind name
-photo = ["jpg", "png", "heic"]
+photo = ["jpg", "png", "heic"]                    # array: extensions only; dates from [metadata]
+
+[kinds.invoice]                                   # table: optional per-kind date config
+extensions = ["pdf"]
+date_sources = ["pdf:CreationDate", "filename", "mtime"]  # replaces [metadata].date_sources
+filename_date_patterns = ["%Y-%m-%d", "%Y%m%d"]   # replaces [metadata].filename_date_patterns
+# omit either date field to keep that [metadata] value
+# omit extensions when a [[kind_rule]] assigns this kind and it claims none
+
+# [[kind_rule]]                                   # optional; tried before [kinds]
+# kind = "invoice"                                # may be absent from [kinds]
+# filename = ["INV_*", "FACTURE_*"]               # file name, including extension
+# parent = ["**/invoices"]                        # parent path relative to the input root
+# extensions = ["pdf"]                            # canonical ext filter; does not own "pdf"
+# vars.bank = "bank2000"                               # placeholder {bank} in directory/filename
+# vars.account = "checking"
 
 [metadata]
 date_sources = ["exif:DateTimeOriginal", "quicktime:CreationDate", "filename", "mtime"]
@@ -63,9 +78,10 @@ scope = "output"                                  # output | global
 flag_missing_date = true
 flag_truncated = true
 
-[templates.fallbacks]                             # per-token; default is "unknown"
+[templates.fallbacks]                             # missing string token, or a custom name
 camera = "unknown_camera"
 author = "unknown_vendor"
+bank = "unknown_bank"                             # {bank} is valid with no kind rule
 
 [state]
 database = "~/.local/share/shelf/<profile>.db"    # leave verbatim for default per-profile path
@@ -81,7 +97,7 @@ preserve_mtime = true                             # default true; stamp dst with
 # optional per-output narrowing:
 # kinds = ["photo", "video"]
 # match = ["INVOICE_*.pdf"]             # filename only
-# match_dir = ["bnc", "bnc/**"]         # dir relative to each input; empty = any
+# match_dir = ["bank2000", "bank2000/**"]         # dir relative to each input; empty = any
 # optional per-kind template overrides:
 # [output.directory_for]
 # video = "{yyyy}/{mm}/videos"
@@ -94,6 +110,7 @@ preserve_mtime = true                             # default true; stamp dst with
 - **Date** (from `taken_at`): `{yyyy} {yy} {mm} {dd} {hh} {min} {ss}` — `{mm}` is month, `{min}` is minute
 - **File**: `{ext}`, `{hash}` / `{hash:8}` (truncate to N hex), `{seq}` / `{seq:05}` (width)
 - **Metadata**: `{camera} {lens} {kind} {author} {title} {vendor}`
+- **Custom**: any `vars.name` on a kind rule, and any `[templates.fallbacks]` key, for example `{bank}`. The winning rule's value wins. If that rule does not set it, the fallback is used, then `unknown`. `:raw` skips slugification.
 - Modifiers: `:NN` (zero-pad width), `:raw` (skip slugification)
 - Strings slugify by default: lowercase, spaces → `_`, strip anything outside `[a-z0-9_-]`
 - Escape literal braces with `{{` and `}}`
@@ -235,7 +252,8 @@ filename  = "{yyyy}-{mm}-{dd}_{seq:04}"
 - **`mode = "move"`** is destructive. Default to `copy` unless the user has explicitly said "move". Re-confirm before writing the file.
 - **Absolute paths** only in `inputs` and `output.path`. Relative paths are ambiguous and untested.
 - **`exclude` patterns** match the path relative to each input root. `**/cache/**` excludes any `cache` folder anywhere; `cache/*` only excludes top-level.
-- **`match_dir`** globs the file's directory relative to the input root. `bnc` matches only files directly in `bnc/`. `bnc/**` matches descendants such as `bnc/2024/` and does not match `bnc` itself. List both to take the folder and everything under it. Omitted or `[]` accepts every directory. `match` still sees only the filename.
+- **`match_dir`** globs the file's directory relative to the input root. `bank2000` matches only files directly in `bank2000/`. `bank2000/**` matches descendants such as `bank2000/2024/` and does not match `bank2000` itself. List both to take the folder and everything under it. Omitted or `[]` accepts every directory. `match` still sees only the filename.
+- **`[[kind_rule]]`** is checked before `[kinds]`. A rule must set `filename` or `parent` (or both). Patterns in one list are OR; fields on the same rule are AND. The matching rule with the most set fields wins, and equal counts keep file order. No match uses `[kinds]`, then `other`. `parent` is the directory containing the file, relative to the input root (`invoices/2024/a.pdf` has parent `invoices/2024`). A file in the input root has parent `.`. `invoices` matches only that top-level directory. `**/invoices` matches a directory named `invoices` at any depth. `extensions` filters the rule and is written in canonical form (`jpg`, not `jpeg`, unless `[extensions.canonical]` maps it).
 - **One workflow per profile.** Don't try to combine "photos" and "invoices" in one — different extractors, different filename conventions. Make two files.
 - **State DB is per-profile.** Renaming the profile filename creates a fresh DB; the old one still sits at `~/.local/share/shelf/<old-name>.db`. Mention this if the user is renaming.
 - **`{seq}` resets per scope.** With `scope = "day"`, day boundaries reset the counter — re-running on the same day continues numbering, the next day starts at 1.

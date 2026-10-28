@@ -16,7 +16,7 @@
 //! [`substitute_seq`]); NUL bytes in the wrapper guarantee no collision with
 //! literal path content.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
@@ -100,6 +100,8 @@ pub struct RenderContext<'a> {
     pub seq: Option<u64>,
     /// `[templates.fallbacks]` from the profile.
     pub fallbacks: &'a BTreeMap<String, String>,
+    /// Vars from the winning kind rule. Empty when no rule matched.
+    pub vars: &'a BTreeMap<String, String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -160,9 +162,51 @@ fn field_kind(name: &str) -> Option<FieldKind> {
     }
 }
 
+/// A name that can be a `{token}` and is not already a built-in.
+#[must_use]
+pub(crate) fn is_custom_token_name(name: &str) -> bool {
+    is_token_ident(name) && field_kind(name).is_none()
+}
+
+/// True when `name` is a built-in template token (`yyyy`, `kind`, `seq`, ...).
+#[must_use]
+pub(crate) fn is_builtin_token(name: &str) -> bool {
+    field_kind(name).is_some()
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`.
+#[must_use]
+pub(crate) fn is_token_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Custom token names from fallback keys and kind-rule var names.
+#[must_use]
+pub(crate) fn custom_template_names<'a>(
+    keys: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<String> {
+    keys.into_iter()
+        .filter(|name| is_custom_token_name(name))
+        .map(str::to_string)
+        .collect()
+}
+
 impl Template {
-    /// Parse a template string into tokens.
+    /// Parse a template string into tokens. Unknown names are rejected.
     pub fn parse(s: &str) -> Result<Self, TemplateParseError> {
+        Self::parse_with(s, &BTreeSet::new())
+    }
+
+    /// Parse a template, treating each name in `extra` as a string token.
+    ///
+    /// Built-in names still win. `yyyy` in `extra` stays a date token.
+    /// An extra name accepts `:raw` and rejects a width modifier.
+    pub fn parse_with(s: &str, extra: &BTreeSet<String>) -> Result<Self, TemplateParseError> {
         let bytes = s.as_bytes();
         let mut tokens: Vec<Token> = Vec::new();
         let mut literal = String::new();
@@ -215,11 +259,16 @@ impl Template {
                         });
                     }
 
-                    let kind =
-                        field_kind(name).ok_or_else(|| TemplateParseError::UnknownToken {
-                            name: name.to_string(),
-                            pos: open,
-                        })?;
+                    let kind = match field_kind(name) {
+                        Some(kind) => kind,
+                        None if extra.contains(name) => FieldKind::StringMeta,
+                        None => {
+                            return Err(TemplateParseError::UnknownToken {
+                                name: name.to_string(),
+                                pos: open,
+                            });
+                        }
+                    };
 
                     let modifier = match modifier_raw {
                         None => None,
@@ -359,7 +408,7 @@ fn render_field(
     ctx: &RenderContext<'_>,
     out: &mut String,
 ) -> Result<(), RenderError> {
-    let kind = field_kind(name).expect("parse rejects unknown tokens");
+    let kind = field_kind(name).unwrap_or(FieldKind::StringMeta);
 
     match kind {
         FieldKind::Date => {
@@ -476,7 +525,7 @@ fn string_meta_value(name: &str, ctx: &RenderContext<'_>) -> Option<String> {
         "author" => ctx.metadata.author.clone(),
         "title" => ctx.metadata.title.clone(),
         "vendor" => ctx.metadata.vendor.clone(),
-        _ => unreachable!("field_kind classified this as StringMeta"),
+        _ => ctx.vars.get(name).cloned(),
     }
 }
 
@@ -552,6 +601,11 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn empty_vars() -> &'static BTreeMap<String, String> {
+        static VARS: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+        VARS.get_or_init(BTreeMap::new)
+    }
+
     fn ctx<'a>(
         when: &'a NaiveDateTime,
         m: &'a Metadata,
@@ -567,6 +621,7 @@ mod tests {
             sha256_hex: hash,
             seq,
             fallbacks: fb,
+            vars: empty_vars(),
         }
     }
 
@@ -658,6 +713,50 @@ mod tests {
                 pos: 0
             }
         );
+    }
+
+    #[test]
+    fn extra_name_is_a_string_token() {
+        let extra: BTreeSet<String> = ["bank".to_string()].into_iter().collect();
+        let t = Template::parse_with("{bank:raw}", &extra).unwrap();
+        let m = md(None, None, "photo");
+        let fb = empty_fb();
+        let mut vars = BTreeMap::new();
+        vars.insert("bank".to_string(), "Bank2000 Checking".to_string());
+        let when = dt(2024, 3, 15, 0, 0, 0);
+        let mut c = ctx(&when, &m, &fb, None, None, "");
+        c.vars = &vars;
+        assert_eq!(t.render(&c).unwrap(), "Bank2000 Checking");
+
+        let slug = Template::parse_with("{bank}", &extra).unwrap();
+        assert_eq!(slug.render(&c).unwrap(), "bank2000_checking");
+    }
+
+    #[test]
+    fn missing_var_uses_fallback_then_unknown() {
+        let extra: BTreeSet<String> = ["bank".to_string()].into_iter().collect();
+        let t = Template::parse_with("{bank}", &extra).unwrap();
+        let m = md(None, None, "photo");
+        let when = dt(2024, 1, 1, 0, 0, 0);
+        let mut fb = BTreeMap::new();
+        fb.insert("bank".to_string(), "unknown_bank".to_string());
+        let c = ctx(&when, &m, &fb, None, None, "");
+        assert_eq!(t.render(&c).unwrap(), "unknown_bank");
+
+        let empty = empty_fb();
+        let c2 = ctx(&when, &m, &empty, None, None, "");
+        assert_eq!(t.render(&c2).unwrap(), "unknown");
+    }
+
+    #[test]
+    fn builtin_name_in_extra_stays_a_date() {
+        let extra: BTreeSet<String> = ["yyyy".to_string()].into_iter().collect();
+        let t = Template::parse_with("{yyyy}", &extra).unwrap();
+        let m = md(None, None, "photo");
+        let fb = empty_fb();
+        let when = dt(2024, 3, 15, 0, 0, 0);
+        let c = ctx(&when, &m, &fb, None, None, "");
+        assert_eq!(t.render(&c).unwrap(), "2024");
     }
 
     #[test]
@@ -981,6 +1080,7 @@ mod proptests {
             let t = Template::parse(&tpl_str).unwrap();
             let m = md();
             let fb = BTreeMap::new();
+            let vars = BTreeMap::new();
             let when = m.taken_at;
             let c = RenderContext {
                 taken_at: &when,
@@ -989,6 +1089,7 @@ mod proptests {
                 sha256_hex: "",
                 seq: Some(value),
                 fallbacks: &fb,
+                vars: &vars,
             };
             let out = t.render(&c).unwrap();
             prop_assert!(out.len() >= width, "expected >= {width} chars, got {out:?}");

@@ -22,9 +22,15 @@ pub struct Profile {
     #[serde(default)]
     pub extensions: Extensions,
 
-    /// Map of kind-name (e.g. `"photo"`) to its canonical extensions.
+    /// Map of kind-name (e.g. `"photo"`) to its extensions and optional
+    /// date overrides. TOML accepts an array of extensions or a table.
     #[serde(default)]
-    pub kinds: BTreeMap<String, Vec<String>>,
+    pub kinds: BTreeMap<String, KindConfig>,
+
+    /// More specific overlays. TOML key `[[kind_rule]]`. Empty keeps
+    /// extension classification unchanged.
+    #[serde(default, rename = "kind_rule")]
+    pub kind_rules: Vec<KindRule>,
 
     #[serde(default)]
     pub metadata: Metadata,
@@ -63,6 +69,96 @@ pub struct Filters {
 pub struct Extensions {
     #[serde(default)]
     pub canonical: BTreeMap<String, String>,
+}
+
+/// A kind assigned when a file's name, parent directory, or both match.
+///
+/// `extensions` narrows the rule. It does not claim that extension in
+/// [`Profile::kinds`]. A rule with neither `filename` nor `parent` is
+/// rejected by validation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct KindRule {
+    pub kind: String,
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    #[serde(default)]
+    pub filename: Vec<String>,
+    #[serde(default)]
+    pub parent: Vec<String>,
+    /// Dotted keys such as `vars.bank = "bank2000"`. Not a match constraint.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
+}
+
+/// One `[kinds]` entry.
+///
+/// TOML accepts a string array (extensions only) or a table. When
+/// `date_sources` or `filename_date_patterns` is `Some`, that list replaces
+/// the matching `[metadata]` field for this kind, including an explicit empty
+/// list. `None` keeps the profile default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "KindConfigDe")]
+#[non_exhaustive]
+pub struct KindConfig {
+    pub extensions: Vec<String>,
+    pub date_sources: Option<Vec<String>>,
+    pub filename_date_patterns: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum KindConfigDe {
+    Extensions(Vec<String>),
+    Table {
+        #[serde(default)]
+        extensions: Vec<String>,
+        #[serde(default)]
+        date_sources: Option<Vec<String>>,
+        #[serde(default)]
+        filename_date_patterns: Option<Vec<String>>,
+    },
+}
+
+impl From<KindConfigDe> for KindConfig {
+    fn from(value: KindConfigDe) -> Self {
+        match value {
+            KindConfigDe::Extensions(extensions) => Self {
+                extensions,
+                date_sources: None,
+                filename_date_patterns: None,
+            },
+            KindConfigDe::Table {
+                extensions,
+                date_sources,
+                filename_date_patterns,
+            } => Self {
+                extensions,
+                date_sources,
+                filename_date_patterns,
+            },
+        }
+    }
+}
+
+impl Profile {
+    /// `date_sources` for `kind`, or `[metadata].date_sources` when unset.
+    #[must_use]
+    pub fn date_sources_for(&self, kind: &str) -> &[String] {
+        self.kinds
+            .get(kind)
+            .and_then(|cfg| cfg.date_sources.as_deref())
+            .unwrap_or(&self.metadata.date_sources)
+    }
+
+    /// Filename date patterns for `kind`, or the `[metadata]` list when unset.
+    #[must_use]
+    pub fn filename_date_patterns_for(&self, kind: &str) -> &[String] {
+        self.kinds
+            .get(kind)
+            .and_then(|cfg| cfg.filename_date_patterns.as_deref())
+            .unwrap_or(&self.metadata.filename_date_patterns)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,8 +304,9 @@ pub struct Output {
     pub directory: String,
     pub filename: String,
 
-    /// Per-output kind filter. `None` accepts any kind.
-    #[serde(default)]
+    /// Per-output kind filter. Missing or empty accepts any kind.
+    /// TOML key `kinds`, also accepted as `kind`.
+    #[serde(default, alias = "kind")]
     pub kinds: Option<Vec<String>>,
 
     /// Per-output filename-glob filter. `None` accepts any name.
@@ -381,8 +478,10 @@ filename  = "{yyyy}-{mm}-{dd}_{author}_{seq:04}"
         assert_eq!(p.filters.include.len(), 6);
         assert_eq!(p.filters.exclude.len(), 3);
         assert_eq!(p.extensions.canonical.get("jpeg").unwrap(), "jpg");
-        assert_eq!(p.kinds["photo"].len(), 6);
-        assert_eq!(p.kinds["raw"].len(), 9);
+        assert_eq!(p.kinds["photo"].extensions.len(), 6);
+        assert_eq!(p.kinds["raw"].extensions.len(), 9);
+        assert!(p.kinds["photo"].date_sources.is_none());
+        assert!(p.kinds["photo"].filename_date_patterns.is_none());
         assert_eq!(p.metadata.date_sources.len(), 4);
         assert_eq!(p.sequence.scope, SequenceScope::Day);
         assert_eq!(p.sequence.start, 1);
@@ -405,13 +504,14 @@ filename  = "{yyyy}-{mm}-{dd}_{author}_{seq:04}"
         assert!(o.match_.is_none());
         assert!(o.match_dir.is_none());
         assert!(o.preserve_mtime, "preserve_mtime defaults to true");
+        assert!(p.kind_rules.is_empty());
     }
 
     #[test]
     fn parses_invoices_profile() {
         let p = parse_str(INVOICES_TOML);
         assert_eq!(p.inputs.len(), 1);
-        assert_eq!(p.kinds["invoice"], vec!["pdf"]);
+        assert_eq!(p.kinds["invoice"].extensions, vec!["pdf"]);
         assert_eq!(p.sequence.scope, SequenceScope::Month);
         assert_eq!(p.sequence.start, 1);
         assert_eq!(
@@ -420,6 +520,89 @@ filename  = "{yyyy}-{mm}-{dd}_{author}_{seq:04}"
         );
         assert_eq!(p.outputs[0].mode, OpMode::Move);
         assert_eq!(p.outputs[0].filename, "{yyyy}-{mm}-{dd}_{author}_{seq:04}");
+    }
+
+    const KIND_DATES_TOML: &str = r#"
+inputs = ["/in"]
+
+[kinds]
+photo = ["jpg"]
+
+[kinds.invoice]
+extensions = ["pdf"]
+date_sources = ["pdf:CreationDate", "filename", "mtime"]
+filename_date_patterns = ["%Y-%m-%d", "%Y%m%d"]
+
+[kinds.video]
+extensions = ["mp4"]
+date_sources = ["quicktime:CreationDate", "filename", "mtime"]
+
+[kinds.raw]
+extensions = ["cr3"]
+date_sources = []
+
+[metadata]
+date_sources = ["exif:DateTimeOriginal", "mtime"]
+filename_date_patterns = ["IMG_%Y%m%d_%H%M%S"]
+"#;
+
+    #[test]
+    fn parses_kind_date_config() {
+        let p = parse_str(KIND_DATES_TOML);
+
+        let photo = &p.kinds["photo"];
+        assert_eq!(photo.extensions, vec!["jpg"]);
+        assert!(photo.date_sources.is_none());
+        assert!(photo.filename_date_patterns.is_none());
+
+        let invoice = &p.kinds["invoice"];
+        assert_eq!(invoice.extensions, vec!["pdf"]);
+        assert_eq!(
+            invoice.date_sources.as_deref().unwrap(),
+            ["pdf:CreationDate", "filename", "mtime"]
+        );
+        assert_eq!(
+            invoice.filename_date_patterns.as_deref().unwrap(),
+            ["%Y-%m-%d", "%Y%m%d"]
+        );
+
+        let video = &p.kinds["video"];
+        assert_eq!(video.extensions, vec!["mp4"]);
+        assert!(video.date_sources.is_some());
+        assert!(video.filename_date_patterns.is_none());
+    }
+
+    #[test]
+    fn date_config_falls_back_per_field() {
+        let p = parse_str(KIND_DATES_TOML);
+        let meta_sources = ["exif:DateTimeOriginal", "mtime"];
+        let meta_patterns = ["IMG_%Y%m%d_%H%M%S"];
+
+        assert_eq!(p.date_sources_for("invoice")[0], "pdf:CreationDate");
+        assert_eq!(p.filename_date_patterns_for("invoice")[0], "%Y-%m-%d");
+
+        assert_eq!(p.date_sources_for("video")[0], "quicktime:CreationDate");
+        assert_eq!(
+            p.filename_date_patterns_for("video"),
+            meta_patterns.as_slice()
+        );
+
+        assert_eq!(p.date_sources_for("photo"), meta_sources.as_slice());
+        assert_eq!(
+            p.filename_date_patterns_for("photo"),
+            meta_patterns.as_slice()
+        );
+        assert_eq!(p.date_sources_for("other"), meta_sources.as_slice());
+        assert_eq!(
+            p.filename_date_patterns_for("missing"),
+            meta_patterns.as_slice()
+        );
+
+        assert!(p.date_sources_for("raw").is_empty());
+        assert_eq!(
+            p.filename_date_patterns_for("raw"),
+            meta_patterns.as_slice()
+        );
     }
 
     #[test]
@@ -572,5 +755,232 @@ filename = "{yyyy}-{mm}"
                 .any(|e| matches!(e, crate::error::ValidationError::BadGlob { .. })),
             "expected BadGlob, got {errs:?}"
         );
+    }
+
+    #[test]
+    fn parses_kind_rules() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[kinds]
+document = ["pdf"]
+
+[[kind_rule]]
+kind = "invoice"
+parent = ["**/invoices"]
+
+[[kind_rule]]
+kind = "receipt"
+extensions = ["pdf"]
+filename = ["INV_*", "FACTURE_*"]
+parent = ["**/invoices"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p = parse_str(toml_str);
+        assert_eq!(p.kind_rules.len(), 2);
+        assert_eq!(p.kind_rules[0].kind, "invoice");
+        assert_eq!(p.kind_rules[0].parent, vec!["**/invoices"]);
+        assert!(p.kind_rules[0].filename.is_empty());
+        assert!(p.kind_rules[0].extensions.is_empty());
+        assert_eq!(p.kind_rules[1].kind, "receipt");
+        assert_eq!(p.kind_rules[1].extensions, vec!["pdf"]);
+        assert_eq!(p.kind_rules[1].filename, vec!["INV_*", "FACTURE_*"]);
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn kind_rule_extensions_do_not_conflict_with_kinds() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[kinds]
+document = ["pdf"]
+
+[[kind_rule]]
+kind = "invoice"
+extensions = ["pdf"]
+parent = ["**/invoices"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(
+            errs.is_empty(),
+            "rule extensions must not own the extension, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn kind_rule_missing_kind_is_validation_error() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = ""
+parent = ["**/invoices"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::KindRuleMissingKind { index: 0 }
+        )));
+    }
+
+    #[test]
+    fn extensions_only_kind_rule_is_validation_error() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = "invoice"
+extensions = ["pdf"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::KindRuleNotSpecific { index: 0, kind } if kind == "invoice"
+        )));
+    }
+
+    #[test]
+    fn kind_rule_bad_glob_is_validation_error() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = "invoice"
+filename = ["*["]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::BadGlob { location, .. } if location == "kind_rule[0].filename"
+        )));
+    }
+
+    #[test]
+    fn parses_kind_rule_dotted_vars() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = "statement"
+parent = ["bank2000/**"]
+vars.bank = "bank2000"
+vars.account = "checking"
+
+[templates.fallbacks]
+bank = "unknown_bank"
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{bank}/{yyyy}"
+filename = "{account}"
+"#;
+        let p = parse_str(toml_str);
+        assert_eq!(p.kind_rules[0].vars.get("bank").unwrap(), "bank2000");
+        assert_eq!(p.kind_rules[0].vars.get("account").unwrap(), "checking");
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn fallback_key_is_a_template_token_without_a_rule_var() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[templates.fallbacks]
+bank = "unknown_bank"
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{bank}/{yyyy}"
+filename = "{yyyy}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn undeclared_template_name_is_validation_error() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{bank}"
+filename = "{yyyy}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::BadTemplate { location, .. } if location == "output.lib.directory"
+        )));
+    }
+
+    #[test]
+    fn kind_rule_var_cannot_shadow_a_builtin_token() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = "statement"
+parent = ["bank2000/**"]
+vars.yyyy = "nope"
+vars.not-a-name = "x"
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::KindRuleBuiltinVar { name, .. } if name == "yyyy"
+        )));
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::KindRuleBadVar { name, .. } if name == "not-a-name"
+        )));
     }
 }

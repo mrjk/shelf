@@ -167,6 +167,16 @@ exclude = ["**/cache/**"]
 [kinds]
 photo = ["jpg", "png", "heic"]
 video = ["mp4", "mov"]
+# [kinds.invoice]          # optional table; array form above stays valid
+# extensions = ["pdf"]
+# date_sources = ["pdf:CreationDate", "filename", "mtime"]  # replaces [metadata] for this kind
+# filename_date_patterns = ["%Y-%m-%d"]                     # omit a field to keep [metadata]
+
+# [[kind_rule]]            # optional; wins over [kinds] when it matches
+# kind = "invoice"
+# parent = ["**/invoices"] # directory relative to the input root
+# filename = ["INV_*"]
+# vars.bank = "bank2000"        # {bank} in directory and filename
 
 [metadata]
 date_sources = ["exif:DateTimeOriginal", "quicktime:CreationDate", "filename", "mtime"]

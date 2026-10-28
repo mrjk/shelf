@@ -42,6 +42,7 @@ fn bench_render(c: &mut Criterion) {
     let mut group = c.benchmark_group("Template::render");
     let md = fake_metadata();
     let fallbacks: BTreeMap<String, String> = BTreeMap::new();
+    let vars: BTreeMap<String, String> = BTreeMap::new();
     let hash = "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe";
 
     for (name, src) in &[("short", SHORT), ("long", LONG)] {
@@ -56,6 +57,7 @@ fn bench_render(c: &mut Criterion) {
                     sha256_hex: hash,
                     seq: Some(42),
                     fallbacks: &fallbacks,
+                    vars: &vars,
                 };
                 t.render(&ctx).expect("render")
             });

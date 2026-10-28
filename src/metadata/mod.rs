@@ -1,7 +1,8 @@
 //! Metadata extraction.
 //!
 //! Each file goes through a chain of [`Extractor`]s declared in
-//! `[metadata].date_sources`. First to produce a `taken_at` wins; the
+//! `date_sources`. A kind's list is used when that kind sets it; otherwise
+//! `[metadata].date_sources` is used. First to produce a `taken_at` wins; the
 //! source is recorded on [`Metadata`] so health checks can flag files
 //! that fell through to `mtime`.
 
@@ -144,11 +145,14 @@ impl SourceSpec {
     }
 }
 
-/// Walk `profile.metadata.date_sources` against `file`, returning the first
+/// Walk `date_sources` for `kind` against `file`, returning the first
 /// extractor to produce a date plus best-effort camera/lens/dimensions.
+///
+/// The kind's `date_sources` and `filename_date_patterns` replace the
+/// `[metadata]` values when set. Each field falls back on its own.
 pub fn extract(profile: &Profile, file: &ScannedFile, kind: &str) -> Result<Metadata> {
     let path = file.absolute_path.as_path();
-    let patterns = &profile.metadata.filename_date_patterns;
+    let patterns = profile.filename_date_patterns_for(kind);
 
     // One extractor instance of each kind so per-path caches let the
     // chain of `try_*` calls open and parse the file once.
@@ -159,7 +163,7 @@ pub fn extract(profile: &Profile, file: &ScannedFile, kind: &str) -> Result<Meta
     let mut taken_at: Option<(NaiveDateTime, DateSource)> = None;
     let mut tried: Vec<String> = Vec::new();
 
-    for raw in &profile.metadata.date_sources {
+    for raw in profile.date_sources_for(kind) {
         let Some(spec) = SourceSpec::parse(raw) else {
             // Skip unparseable specs without recording them — `sources_tried`
             // should reflect what was actually attempted, not config typos.
@@ -171,7 +175,7 @@ pub fn extract(profile: &Profile, file: &ScannedFile, kind: &str) -> Result<Meta
             SourceSpec::Quicktime => qt_extractor.try_date(path, kind)?,
             SourceSpec::Pdf => pdf_extractor.try_date(path, kind)?,
             SourceSpec::Filename => {
-                filename::FilenameExtractor::new(patterns.clone()).try_date(path, kind)?
+                filename::FilenameExtractor::new(patterns.to_vec()).try_date(path, kind)?
             }
             SourceSpec::Mtime => mtime::MtimeExtractor.try_date(path, kind)?,
         };
@@ -271,7 +275,7 @@ mod tests {
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
-    use crate::config::{Filters, Metadata as MetadataCfg};
+    use crate::config::{Filters, KindConfig, Metadata as MetadataCfg};
     use std::io::Cursor;
 
     use ::exif::experimental::Writer;
@@ -346,6 +350,7 @@ mod dispatch_tests {
             filters: Filters::default(),
             extensions: Default::default(),
             kinds: Default::default(),
+            kind_rules: Vec::new(),
             metadata: MetadataCfg {
                 date_sources: date_sources.iter().map(|s| (*s).to_string()).collect(),
                 filename_date_patterns: patterns.iter().map(|s| (*s).to_string()).collect(),
@@ -544,5 +549,35 @@ mod dispatch_tests {
         assert_eq!(md.taken_at_source, DateSource::Filename);
         assert!(md.author.is_none());
         assert!(md.title.is_none());
+    }
+
+    #[test]
+    fn dispatch_uses_kind_date_config_over_metadata() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_file(tmp.path(), "IMG_20240315_142210.jpg", &bare_jpeg());
+
+        let mut profile = photo_profile(&["mtime"], &["VID_%Y%m%d_%H%M%S"]);
+        profile.kinds.insert(
+            "photo".to_string(),
+            KindConfig {
+                extensions: vec!["jpg".to_string()],
+                date_sources: Some(vec!["filename".to_string()]),
+                filename_date_patterns: Some(vec!["IMG_%Y%m%d_%H%M%S".to_string()]),
+            },
+        );
+
+        let file = scanned(tmp.path(), "IMG_20240315_142210.jpg");
+        let photo = extract(&profile, &file, "photo").unwrap();
+        assert_eq!(photo.taken_at_source, DateSource::Filename);
+        assert_eq!(
+            photo.taken_at,
+            NaiveDate::from_ymd_opt(2024, 3, 15)
+                .unwrap()
+                .and_hms_opt(14, 22, 10)
+                .unwrap()
+        );
+
+        let other = extract(&profile, &file, "other").unwrap();
+        assert_eq!(other.taken_at_source, DateSource::Mtime);
     }
 }

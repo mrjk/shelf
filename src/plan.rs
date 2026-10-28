@@ -18,7 +18,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::config::{DedupeScope, OnConflict, OnDuplicate, OpMode, Output, Profile};
 use crate::error::{Error, Result};
 use crate::hash::{hex, sha256_file};
-use crate::kind::classify_scanned;
+use crate::kind::{CompiledKindRules, classify_scanned, compile_kind_rules, strip_trailing_slash};
 use crate::metadata::{DateSource, Metadata, extract};
 use crate::progress::Progress;
 use crate::scan::ScannedFile;
@@ -144,10 +144,11 @@ pub fn plan(
     // pre-compute phase resolves cache hits in memory instead of through a
     // per-file SELECT.
     let cache = state.load_hash_cache()?;
+    let kind_rules = compile_kind_rules(profile)?;
 
     let computed: Vec<std::result::Result<Computed, HealthEntry>> = scanned
         .into_par_iter()
-        .map(|file| compute_one(profile, file, &cache))
+        .map(|file| compute_one(profile, &kind_rules, file, &cache))
         .collect();
 
     let mut ready: Vec<ReadyFile> = Vec::with_capacity(computed.len());
@@ -177,13 +178,17 @@ pub fn plan(
             .then_with(|| a.file.absolute_path.cmp(&b.file.absolute_path))
     });
 
-    let match_sets = compile_glob_sets(&profile.outputs, |o| o.match_.as_deref())?;
+    let match_sets = compile_glob_sets(&profile.outputs, |o| o.match_.as_deref(), false)?;
     // An empty `match` still becomes a set that matches nothing. An empty
     // `match_dir` is omitted so it accepts every directory.
-    let match_dir_sets = compile_glob_sets(&profile.outputs, |o| match o.match_dir.as_deref() {
-        Some(patterns) if !patterns.is_empty() => Some(patterns),
-        _ => None,
-    })?;
+    let match_dir_sets = compile_glob_sets(
+        &profile.outputs,
+        |o| match o.match_dir.as_deref() {
+            Some(patterns) if !patterns.is_empty() => Some(patterns),
+            _ => None,
+        },
+        true,
+    )?;
 
     // In-batch state: peeked seqs are not reserved, so the planner tracks
     // per-bucket counters and claimed paths locally for the lifetime of this call.
@@ -235,6 +240,7 @@ struct ReadyFile {
     sha256_hex: String,
     file_id: FileId,
     classified_as_other: bool,
+    vars: BTreeMap<String, String>,
 }
 
 /// Output of the parallel pre-compute phase. Carries everything the DB-write
@@ -245,6 +251,7 @@ struct Computed {
     metadata: Metadata,
     sha256: [u8; 32],
     classified_as_other: bool,
+    vars: BTreeMap<String, String>,
 }
 
 /// Pure-compute work for a single candidate. No DB access — the cache lookup
@@ -252,10 +259,11 @@ struct Computed {
 /// surfaced as [`HealthEntry`]s; nothing here aborts the planner.
 fn compute_one(
     profile: &Profile,
+    kind_rules: &CompiledKindRules,
     file: ScannedFile,
     cache: &HashMap<String, CachedFileEntry>,
 ) -> std::result::Result<Computed, HealthEntry> {
-    let classified = classify_scanned(profile, &file);
+    let classified = classify_scanned(profile, kind_rules, &file);
 
     let sha256 = match resolve_hash(&file, cache) {
         Ok(b) => b,
@@ -287,6 +295,7 @@ fn compute_one(
         metadata,
         sha256,
         classified_as_other,
+        vars: classified.vars,
     })
 }
 
@@ -324,6 +333,7 @@ fn upsert_chunk(
                     sha256_hex: hex(&c.sha256),
                     file_id,
                     classified_as_other: c.classified_as_other,
+                    vars: c.vars,
                 }),
                 Err(e) => plan.health.push(HealthEntry {
                     kind: HealthKind::HashFailed,
@@ -365,7 +375,8 @@ fn plan_one(
         }
         routed = true;
 
-        let dir = render_directory(output, ready, &profile.templates.fallbacks)?;
+        let custom_names = crate::config::validate::profile_custom_names(profile);
+        let dir = render_directory(output, ready, &profile.templates.fallbacks, &custom_names)?;
         let scope_key =
             Sequencer::scope_key(profile.sequence.scope, &ready.metadata.taken_at, Some(&dir));
 
@@ -382,7 +393,13 @@ fn plan_one(
             }
         };
 
-        let filename = render_filename(output, ready, &profile.templates.fallbacks, Some(seq))?;
+        let filename = render_filename(
+            output,
+            ready,
+            &profile.templates.fallbacks,
+            &custom_names,
+            Some(seq),
+        )?;
         let dst = compose_dst(
             &output.path,
             &dir,
@@ -559,6 +576,7 @@ fn output_accepts(
     match_dir_sets: &BTreeMap<String, GlobSet>,
 ) -> bool {
     if let Some(kinds) = &output.kinds
+        && !kinds.is_empty()
         && !kinds.iter().any(|k| k == &ready.metadata.kind)
     {
         return false;
@@ -595,6 +613,7 @@ fn relative_dir(file: &ScannedFile) -> String {
 fn compile_glob_sets<'a>(
     outputs: &'a [Output],
     patterns_of: impl Fn(&'a Output) -> Option<&'a [String]>,
+    strip_slash: bool,
 ) -> Result<BTreeMap<String, GlobSet>> {
     let mut out = BTreeMap::new();
     for o in outputs {
@@ -603,7 +622,12 @@ fn compile_glob_sets<'a>(
         };
         let mut b = GlobSetBuilder::new();
         for p in patterns {
-            let g = Glob::new(p).map_err(|source| Error::BadGlob {
+            let compiled = if strip_slash {
+                strip_trailing_slash(p)
+            } else {
+                p.as_str()
+            };
+            let g = Glob::new(compiled).map_err(|source| Error::BadGlob {
                 pattern: p.clone(),
                 source,
             })?;
@@ -622,19 +646,21 @@ fn render_directory(
     output: &Output,
     ready: &ReadyFile,
     fallbacks: &BTreeMap<String, String>,
+    custom_names: &BTreeSet<String>,
 ) -> Result<String> {
     let tpl = output
         .directory_for
         .get(&ready.metadata.kind)
         .unwrap_or(&output.directory);
     let location = format!("output `{}`.directory", output.name);
-    render(&location, tpl, ready, fallbacks, None)
+    render(&location, tpl, ready, fallbacks, custom_names, None)
 }
 
 fn render_filename(
     output: &Output,
     ready: &ReadyFile,
     fallbacks: &BTreeMap<String, String>,
+    custom_names: &BTreeSet<String>,
     seq: Option<u64>,
 ) -> Result<String> {
     let tpl = output
@@ -642,7 +668,7 @@ fn render_filename(
         .get(&ready.metadata.kind)
         .unwrap_or(&output.filename);
     let location = format!("output `{}`.filename", output.name);
-    let rendered = render(&location, tpl, ready, fallbacks, seq)?;
+    let rendered = render(&location, tpl, ready, fallbacks, custom_names, seq)?;
     if let Some(s) = seq {
         substitute_seq(&rendered, s).ok_or_else(|| Error::Template {
             location,
@@ -659,9 +685,10 @@ fn render(
     tpl_str: &str,
     ready: &ReadyFile,
     fallbacks: &BTreeMap<String, String>,
+    custom_names: &BTreeSet<String>,
     seq: Option<u64>,
 ) -> Result<String> {
-    let tpl = Template::parse(tpl_str).map_err(|e| Error::Template {
+    let tpl = Template::parse_with(tpl_str, custom_names).map_err(|e| Error::Template {
         location: location.to_string(),
         template: tpl_str.to_string(),
         reason: e.to_string(),
@@ -673,6 +700,7 @@ fn render(
         sha256_hex: &ready.sha256_hex,
         seq,
         fallbacks,
+        vars: &ready.vars,
     };
     tpl.render(&ctx).map_err(|e| Error::Template {
         location: location.to_string(),
@@ -965,6 +993,7 @@ mod tests {
             sha256_hex: "0".repeat(64),
             file_id: FileId(1),
             classified_as_other: false,
+            vars: BTreeMap::new(),
         };
         let mut output: Output = toml::from_str(
             r#"name = "lib"
@@ -981,5 +1010,33 @@ kinds = ["video"]
         assert!(output_accepts(&output, &ready, &no_globs, &no_globs));
         output.kinds = None;
         assert!(output_accepts(&output, &ready, &no_globs, &no_globs));
+        output.kinds = Some(vec![]);
+        assert!(output_accepts(&output, &ready, &no_globs, &no_globs));
+
+        let aliased: Output = toml::from_str(
+            r#"name = "lib"
+path = "/o"
+directory = "{yyyy}"
+filename = "{yyyy}"
+kind = ["video"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            aliased.kinds.as_deref(),
+            Some(["video".to_string()].as_slice())
+        );
+        assert!(!output_accepts(&aliased, &ready, &no_globs, &no_globs));
+
+        let aliased_photo: Output = toml::from_str(
+            r#"name = "lib"
+path = "/o"
+directory = "{yyyy}"
+filename = "{yyyy}"
+kind = ["photo"]
+"#,
+        )
+        .unwrap();
+        assert!(output_accepts(&aliased_photo, &ready, &no_globs, &no_globs));
     }
 }
