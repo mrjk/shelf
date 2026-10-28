@@ -236,6 +236,7 @@ struct ReadyFile {
     sha256_hex: String,
     file_id: FileId,
     classified_as_other: bool,
+    vars: BTreeMap<String, String>,
 }
 
 /// Output of the parallel pre-compute phase. Carries everything the DB-write
@@ -246,6 +247,7 @@ struct Computed {
     metadata: Metadata,
     sha256: [u8; 32],
     classified_as_other: bool,
+    vars: BTreeMap<String, String>,
 }
 
 /// Pure-compute work for a single candidate. No DB access — the cache lookup
@@ -289,6 +291,7 @@ fn compute_one(
         metadata,
         sha256,
         classified_as_other,
+        vars: classified.vars,
     })
 }
 
@@ -326,6 +329,7 @@ fn upsert_chunk(
                     sha256_hex: hex(&c.sha256),
                     file_id,
                     classified_as_other: c.classified_as_other,
+                    vars: c.vars,
                 }),
                 Err(e) => plan.health.push(HealthEntry {
                     kind: HealthKind::HashFailed,
@@ -367,7 +371,8 @@ fn plan_one(
         }
         routed = true;
 
-        let dir = render_directory(output, ready, &profile.templates.fallbacks)?;
+        let custom_names = crate::config::validate::profile_custom_names(profile);
+        let dir = render_directory(output, ready, &profile.templates.fallbacks, &custom_names)?;
         let scope_key =
             Sequencer::scope_key(profile.sequence.scope, &ready.metadata.taken_at, Some(&dir));
 
@@ -384,7 +389,13 @@ fn plan_one(
             }
         };
 
-        let filename = render_filename(output, ready, &profile.templates.fallbacks, Some(seq))?;
+        let filename = render_filename(
+            output,
+            ready,
+            &profile.templates.fallbacks,
+            &custom_names,
+            Some(seq),
+        )?;
         let dst = compose_dst(
             &output.path,
             &dir,
@@ -624,19 +635,21 @@ fn render_directory(
     output: &Output,
     ready: &ReadyFile,
     fallbacks: &BTreeMap<String, String>,
+    custom_names: &BTreeSet<String>,
 ) -> Result<String> {
     let tpl = output
         .directory_for
         .get(&ready.metadata.kind)
         .unwrap_or(&output.directory);
     let location = format!("output `{}`.directory", output.name);
-    render(&location, tpl, ready, fallbacks, None)
+    render(&location, tpl, ready, fallbacks, custom_names, None)
 }
 
 fn render_filename(
     output: &Output,
     ready: &ReadyFile,
     fallbacks: &BTreeMap<String, String>,
+    custom_names: &BTreeSet<String>,
     seq: Option<u64>,
 ) -> Result<String> {
     let tpl = output
@@ -644,7 +657,7 @@ fn render_filename(
         .get(&ready.metadata.kind)
         .unwrap_or(&output.filename);
     let location = format!("output `{}`.filename", output.name);
-    let rendered = render(&location, tpl, ready, fallbacks, seq)?;
+    let rendered = render(&location, tpl, ready, fallbacks, custom_names, seq)?;
     if let Some(s) = seq {
         substitute_seq(&rendered, s).ok_or_else(|| Error::Template {
             location,
@@ -661,9 +674,10 @@ fn render(
     tpl_str: &str,
     ready: &ReadyFile,
     fallbacks: &BTreeMap<String, String>,
+    custom_names: &BTreeSet<String>,
     seq: Option<u64>,
 ) -> Result<String> {
-    let tpl = Template::parse(tpl_str).map_err(|e| Error::Template {
+    let tpl = Template::parse_with(tpl_str, custom_names).map_err(|e| Error::Template {
         location: location.to_string(),
         template: tpl_str.to_string(),
         reason: e.to_string(),
@@ -675,6 +689,7 @@ fn render(
         sha256_hex: &ready.sha256_hex,
         seq,
         fallbacks,
+        vars: &ready.vars,
     };
     tpl.render(&ctx).map_err(|e| Error::Template {
         location: location.to_string(),
@@ -967,6 +982,7 @@ mod tests {
             sha256_hex: "0".repeat(64),
             file_id: FileId(1),
             classified_as_other: false,
+            vars: BTreeMap::new(),
         };
         let mut output: Output = toml::from_str(
             r#"name = "lib"

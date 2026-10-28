@@ -172,6 +172,7 @@ video = ["mp4", "mov"]
 # kind = "invoice"
 # parent = ["**/invoices"] # directory relative to the input root
 # filename = ["INV_*"]
+# vars.bank = "bank2000"        # {bank} in directory and filename
 
 [metadata]
 date_sources = ["exif:DateTimeOriginal", "quicktime:CreationDate", "filename", "mtime"]

@@ -31,6 +31,7 @@ struct CompiledRule {
     extensions: Option<BTreeSet<String>>,
     filename: Option<GlobSet>,
     parent: Option<GlobSet>,
+    vars: BTreeMap<String, String>,
 }
 
 /// Compile `profile.kind_rules` for repeated matching.
@@ -55,6 +56,7 @@ pub fn compile_kind_rules(profile: &Profile) -> Result<CompiledKindRules> {
                 extensions: normalize_extensions(&rule.extensions, &profile.extensions.canonical),
                 filename,
                 parent,
+                vars: rule.vars.clone(),
             },
         ));
     }
@@ -138,6 +140,9 @@ pub fn classify(canonical_ext: Option<&str>, kinds: &BTreeMap<String, Vec<String
 pub struct Classified {
     pub canonical_ext: Option<String>,
     pub kind: String,
+    /// Vars from the winning rule. Empty when classification fell through
+    /// to the extension map.
+    pub vars: BTreeMap<String, String>,
 }
 
 /// Run extension normalization and kind classification for one scanned file.
@@ -152,13 +157,17 @@ pub fn classify_scanned(
     file: &ScannedFile,
 ) -> Classified {
     let canonical_ext = canonical_extension(&file.absolute_path, &profile.extensions.canonical);
-    let kind = match matching_rule(rules, file, canonical_ext.as_deref()) {
-        Some(rule) => rule.kind.clone(),
-        None => classify(canonical_ext.as_deref(), &profile.kinds),
+    let (kind, vars) = match matching_rule(rules, file, canonical_ext.as_deref()) {
+        Some(rule) => (rule.kind.clone(), rule.vars.clone()),
+        None => (
+            classify(canonical_ext.as_deref(), &profile.kinds),
+            BTreeMap::new(),
+        ),
     };
     Classified {
         canonical_ext,
         kind,
+        vars,
     }
 }
 
@@ -465,7 +474,33 @@ parent = ["."]
             extensions: vec!["pdf".to_string()],
             filename: Vec::new(),
             parent: Vec::new(),
+            vars: BTreeMap::new(),
         });
         assert_eq!(kind_of(&profile, "scan.pdf"), "document");
+    }
+
+    #[test]
+    fn winning_rule_supplies_vars() {
+        let profile = rule_profile(
+            r#"
+[[kind_rule]]
+kind = "statement"
+parent = ["**/bank2000"]
+vars.bank = "bank2000"
+vars.account = "checking"
+"#,
+        );
+        let rules = compile_kind_rules(&profile).unwrap();
+        let matched = classify_scanned(&profile, &rules, &scanned("bank2000/stmt.pdf"));
+        assert_eq!(matched.kind, "statement");
+        assert_eq!(matched.vars.get("bank").map(String::as_str), Some("bank2000"));
+        assert_eq!(
+            matched.vars.get("account").map(String::as_str),
+            Some("checking")
+        );
+
+        let missed = classify_scanned(&profile, &rules, &scanned("scan.pdf"));
+        assert_eq!(missed.kind, "document");
+        assert!(missed.vars.is_empty());
     }
 }

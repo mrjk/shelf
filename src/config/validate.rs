@@ -8,7 +8,7 @@ use globset::Glob;
 
 use super::profile::Profile;
 use crate::error::ValidationError;
-use crate::template::Template;
+use crate::template::{Template, custom_template_names, is_builtin_token, is_token_ident};
 
 /// Run every documented check against `profile`. Empty vec on success.
 pub fn validate(profile: &Profile) -> Vec<ValidationError> {
@@ -74,6 +74,19 @@ fn check_kind_rules(profile: &Profile, errors: &mut Vec<ValidationError>) {
                 kind: rule.kind.clone(),
             });
         }
+        for name in rule.vars.keys() {
+            if is_builtin_token(name) {
+                errors.push(ValidationError::KindRuleBuiltinVar {
+                    index,
+                    name: name.clone(),
+                });
+            } else if !is_token_ident(name) {
+                errors.push(ValidationError::KindRuleBadVar {
+                    index,
+                    name: name.clone(),
+                });
+            }
+        }
     }
 }
 
@@ -109,8 +122,9 @@ fn check_globs(profile: &Profile, errors: &mut Vec<ValidationError>) {
 }
 
 fn check_templates(profile: &Profile, errors: &mut Vec<ValidationError>) {
+    let extra = profile_custom_names(profile);
     let mut check = |tpl: &str, location: String| {
-        if let Err(e) = Template::parse(tpl) {
+        if let Err(e) = Template::parse_with(tpl, &extra) {
             errors.push(ValidationError::BadTemplate {
                 location,
                 template: tpl.to_string(),
@@ -129,4 +143,17 @@ fn check_templates(profile: &Profile, errors: &mut Vec<ValidationError>) {
             check(tpl, format!("output.{}.filename_for.{}", out.name, kind));
         }
     }
+}
+
+pub(crate) fn profile_custom_names(profile: &Profile) -> BTreeSet<String> {
+    let mut keys: Vec<&str> = profile
+        .templates
+        .fallbacks
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for rule in &profile.kind_rules {
+        keys.extend(rule.vars.keys().map(String::as_str));
+    }
+    custom_template_names(keys)
 }

@@ -35,6 +35,10 @@ pub enum ValidationError {
     KindRuleMissingKind { index: usize },
     #[error("`[[kind_rule]]` #{index} (`{kind}`) must set `filename` or `parent`")]
     KindRuleNotSpecific { index: usize, kind: String },
+    #[error("`[[kind_rule]]` #{index} var `{name}` is not a valid token name")]
+    KindRuleBadVar { index: usize, name: String },
+    #[error("`[[kind_rule]]` #{index} var `{name}` collides with a built-in token")]
+    KindRuleBuiltinVar { index: usize, name: String },
 }
 
 /// Crate-wide error type. Validation problems are collected into a single

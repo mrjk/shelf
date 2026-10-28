@@ -85,6 +85,9 @@ pub struct KindRule {
     pub filename: Vec<String>,
     #[serde(default)]
     pub parent: Vec<String>,
+    /// Dotted keys such as `vars.bank = "bank2000"`. Not a match constraint.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -727,6 +730,100 @@ filename = "{yyyy}-{mm}"
         assert!(errs.iter().any(|e| matches!(
             e,
             crate::error::ValidationError::BadGlob { location, .. } if location == "kind_rule[0].filename"
+        )));
+    }
+
+    #[test]
+    fn parses_kind_rule_dotted_vars() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = "statement"
+parent = ["bank2000/**"]
+vars.bank = "bank2000"
+vars.account = "checking"
+
+[templates.fallbacks]
+bank = "unknown_bank"
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{bank}/{yyyy}"
+filename = "{account}"
+"#;
+        let p = parse_str(toml_str);
+        assert_eq!(p.kind_rules[0].vars.get("bank").unwrap(), "bank2000");
+        assert_eq!(p.kind_rules[0].vars.get("account").unwrap(), "checking");
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn fallback_key_is_a_template_token_without_a_rule_var() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[templates.fallbacks]
+bank = "unknown_bank"
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{bank}/{yyyy}"
+filename = "{yyyy}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn undeclared_template_name_is_validation_error() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{bank}"
+filename = "{yyyy}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::BadTemplate { location, .. } if location == "output.lib.directory"
+        )));
+    }
+
+    #[test]
+    fn kind_rule_var_cannot_shadow_a_builtin_token() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = "statement"
+parent = ["bank2000/**"]
+vars.yyyy = "nope"
+vars.not-a-name = "x"
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::KindRuleBuiltinVar { name, .. } if name == "yyyy"
+        )));
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::KindRuleBadVar { name, .. } if name == "not-a-name"
         )));
     }
 }
