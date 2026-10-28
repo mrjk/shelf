@@ -572,6 +572,7 @@ fn output_accepts(
     match_dir_sets: &BTreeMap<String, GlobSet>,
 ) -> bool {
     if let Some(kinds) = &output.kinds
+        && !kinds.is_empty()
         && !kinds.iter().any(|k| k == &ready.metadata.kind)
     {
         return false;
@@ -999,5 +1000,33 @@ kinds = ["video"]
         assert!(output_accepts(&output, &ready, &no_globs, &no_globs));
         output.kinds = None;
         assert!(output_accepts(&output, &ready, &no_globs, &no_globs));
+        output.kinds = Some(vec![]);
+        assert!(output_accepts(&output, &ready, &no_globs, &no_globs));
+
+        let aliased: Output = toml::from_str(
+            r#"name = "lib"
+path = "/o"
+directory = "{yyyy}"
+filename = "{yyyy}"
+kind = ["video"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            aliased.kinds.as_deref(),
+            Some(["video".to_string()].as_slice())
+        );
+        assert!(!output_accepts(&aliased, &ready, &no_globs, &no_globs));
+
+        let aliased_photo: Output = toml::from_str(
+            r#"name = "lib"
+path = "/o"
+directory = "{yyyy}"
+filename = "{yyyy}"
+kind = ["photo"]
+"#,
+        )
+        .unwrap();
+        assert!(output_accepts(&aliased_photo, &ready, &no_globs, &no_globs));
     }
 }

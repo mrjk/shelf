@@ -304,8 +304,9 @@ pub struct Output {
     pub directory: String,
     pub filename: String,
 
-    /// Per-output kind filter. `None` accepts any kind.
-    #[serde(default)]
+    /// Per-output kind filter. Missing or empty accepts any kind.
+    /// TOML key `kinds`, also accepted as `kind`.
+    #[serde(default, alias = "kind")]
     pub kinds: Option<Vec<String>>,
 
     /// Per-output filename-glob filter. `None` accepts any name.
