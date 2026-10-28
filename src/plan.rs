@@ -18,7 +18,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::config::{DedupeScope, OnConflict, OnDuplicate, OpMode, Output, Profile};
 use crate::error::{Error, Result};
 use crate::hash::{hex, sha256_file};
-use crate::kind::{CompiledKindRules, classify_scanned, compile_kind_rules};
+use crate::kind::{CompiledKindRules, classify_scanned, compile_kind_rules, strip_trailing_slash};
 use crate::metadata::{DateSource, Metadata, extract};
 use crate::progress::Progress;
 use crate::scan::ScannedFile;
@@ -178,13 +178,17 @@ pub fn plan(
             .then_with(|| a.file.absolute_path.cmp(&b.file.absolute_path))
     });
 
-    let match_sets = compile_glob_sets(&profile.outputs, |o| o.match_.as_deref())?;
+    let match_sets = compile_glob_sets(&profile.outputs, |o| o.match_.as_deref(), false)?;
     // An empty `match` still becomes a set that matches nothing. An empty
     // `match_dir` is omitted so it accepts every directory.
-    let match_dir_sets = compile_glob_sets(&profile.outputs, |o| match o.match_dir.as_deref() {
-        Some(patterns) if !patterns.is_empty() => Some(patterns),
-        _ => None,
-    })?;
+    let match_dir_sets = compile_glob_sets(
+        &profile.outputs,
+        |o| match o.match_dir.as_deref() {
+            Some(patterns) if !patterns.is_empty() => Some(patterns),
+            _ => None,
+        },
+        true,
+    )?;
 
     // In-batch state: peeked seqs are not reserved, so the planner tracks
     // per-bucket counters and claimed paths locally for the lifetime of this call.
@@ -609,6 +613,7 @@ fn relative_dir(file: &ScannedFile) -> String {
 fn compile_glob_sets<'a>(
     outputs: &'a [Output],
     patterns_of: impl Fn(&'a Output) -> Option<&'a [String]>,
+    strip_slash: bool,
 ) -> Result<BTreeMap<String, GlobSet>> {
     let mut out = BTreeMap::new();
     for o in outputs {
@@ -617,7 +622,12 @@ fn compile_glob_sets<'a>(
         };
         let mut b = GlobSetBuilder::new();
         for p in patterns {
-            let g = Glob::new(p).map_err(|source| Error::BadGlob {
+            let compiled = if strip_slash {
+                strip_trailing_slash(p)
+            } else {
+                p.as_str()
+            };
+            let g = Glob::new(compiled).map_err(|source| Error::BadGlob {
                 pattern: p.clone(),
                 source,
             })?;

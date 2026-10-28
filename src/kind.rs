@@ -42,8 +42,8 @@ struct CompiledRule {
 pub fn compile_kind_rules(profile: &Profile) -> Result<CompiledKindRules> {
     let mut ranked: Vec<(u8, usize, CompiledRule)> = Vec::new();
     for (order, rule) in profile.kind_rules.iter().enumerate() {
-        let filename = compile_globs(&rule.filename)?;
-        let parent = compile_globs(&rule.parent)?;
+        let filename = compile_globs(&rule.filename, false)?;
+        let parent = compile_globs(&rule.parent, true)?;
         if filename.is_none() && parent.is_none() {
             continue;
         }
@@ -98,13 +98,34 @@ fn normalize_extensions(
     )
 }
 
-fn compile_globs(patterns: &[String]) -> Result<Option<GlobSet>> {
+/// Drop a trailing `/` from a directory glob.
+///
+/// Compared paths come from `Path::parent()` and never end in `/`, so a
+/// literal slash at the end of the pattern would never match. A pattern
+/// that is only slashes is left unchanged: an empty glob would match the
+/// input root.
+#[must_use]
+pub(crate) fn strip_trailing_slash(pattern: &str) -> &str {
+    let stripped = pattern.trim_end_matches('/');
+    if stripped.is_empty() {
+        pattern
+    } else {
+        stripped
+    }
+}
+
+fn compile_globs(patterns: &[String], strip_slash: bool) -> Result<Option<GlobSet>> {
     if patterns.is_empty() {
         return Ok(None);
     }
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
-        let glob = GlobBuilder::new(pattern)
+        let compiled = if strip_slash {
+            strip_trailing_slash(pattern)
+        } else {
+            pattern.as_str()
+        };
+        let glob = GlobBuilder::new(compiled)
             .case_insensitive(true)
             .build()
             .map_err(|source| Error::BadGlob {
@@ -384,6 +405,28 @@ parent = ["**/invoices"]
         assert_eq!(kind_of(&profile, "scan.pdf"), "document");
         assert_eq!(kind_of(&profile, "holiday.jpg"), "photo");
         assert_eq!(kind_of(&profile, "invoices/2024/notes.pdf"), "document");
+    }
+
+    #[test]
+    fn parent_trailing_slash_is_stripped() {
+        let exact = rule_profile(
+            r#"
+[[kind_rule]]
+kind = "invoice"
+parent = ["invoices/"]
+"#,
+        );
+        assert_eq!(kind_of(&exact, "invoices/notes.pdf"), "invoice");
+        assert_eq!(kind_of(&exact, "invoices/2024/notes.pdf"), "document");
+
+        let nested = rule_profile(
+            r#"
+[[kind_rule]]
+kind = "invoice"
+parent = ["**/invoices/"]
+"#,
+        );
+        assert_eq!(kind_of(&nested, "2024/invoices/notes.pdf"), "invoice");
     }
 
     #[test]

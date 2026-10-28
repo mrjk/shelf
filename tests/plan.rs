@@ -384,6 +384,16 @@ fn match_dir_exact_accepts_only_that_directory() {
 }
 
 #[test]
+fn match_dir_trailing_slash_is_stripped() {
+    let (placed, unrouted) = route_match_dir(
+        r#"match_dir = ["bank2000/"]"#,
+        &["bank2000/a.jpg", "bank2000/2024/a.jpg", "other/a.jpg"],
+    );
+    assert_eq!(placed, vec!["bank2000/a.jpg"]);
+    assert_eq!(unrouted, vec!["bank2000/2024/a.jpg", "other/a.jpg"]);
+}
+
+#[test]
 fn match_dir_descendant_glob_skips_the_directory_itself() {
     let (placed, unrouted) = route_match_dir(
         r#"match_dir = ["bank2000/**"]"#,
