@@ -45,8 +45,8 @@ fn check_unique_output_names(profile: &Profile, errors: &mut Vec<ValidationError
 
 fn check_kind_extension_uniqueness(profile: &Profile, errors: &mut Vec<ValidationError>) {
     let mut owner: BTreeMap<String, String> = BTreeMap::new();
-    for (kind, exts) in &profile.kinds {
-        for ext in exts {
+    for (kind, cfg) in &profile.kinds {
+        for ext in &cfg.extensions {
             let key = ext.to_ascii_lowercase();
             if let Some(prev) = owner.get(&key) {
                 if prev != kind {

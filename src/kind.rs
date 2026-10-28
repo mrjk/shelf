@@ -12,7 +12,7 @@ use std::path::Path;
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
-use crate::config::{KindRule, Profile};
+use crate::config::{KindConfig, KindRule, Profile};
 use crate::error::{Error, Result};
 use crate::extension::canonical_extension;
 use crate::scan::ScannedFile;
@@ -123,12 +123,12 @@ fn compile_globs(patterns: &[String]) -> Result<Option<GlobSet>> {
 /// Resolve a canonical extension to its kind, or `"other"` if no kind claims
 /// it (or the file had no extension).
 #[must_use]
-pub fn classify(canonical_ext: Option<&str>, kinds: &BTreeMap<String, Vec<String>>) -> String {
+pub fn classify(canonical_ext: Option<&str>, kinds: &BTreeMap<String, KindConfig>) -> String {
     let Some(ext) = canonical_ext else {
         return OTHER.to_string();
     };
-    for (name, exts) in kinds {
-        if exts.iter().any(|e| e == ext) {
+    for (name, cfg) in kinds {
+        if cfg.extensions.iter().any(|e| e == ext) {
             return name.clone();
         }
     }
@@ -228,30 +228,28 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn photo_kinds() -> BTreeMap<String, Vec<String>> {
+    fn kind_exts(exts: &[&str]) -> KindConfig {
+        KindConfig {
+            extensions: exts.iter().copied().map(str::to_string).collect(),
+            ..KindConfig::default()
+        }
+    }
+
+    fn photo_kinds() -> BTreeMap<String, KindConfig> {
         let mut m = BTreeMap::new();
         m.insert(
             "photo".to_string(),
-            vec!["jpg", "png", "heic", "webp", "tiff", "bmp"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            kind_exts(&["jpg", "png", "heic", "webp", "tiff", "bmp"]),
         );
         m.insert(
             "raw".to_string(),
-            vec![
+            kind_exts(&[
                 "cr2", "cr3", "nef", "arw", "dng", "raf", "orf", "rw2", "srw",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+            ]),
         );
         m.insert(
             "video".to_string(),
-            vec!["mp4", "mov", "mkv", "avi", "m4v", "mts", "m2ts"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            kind_exts(&["mp4", "mov", "mkv", "avi", "m4v", "mts", "m2ts"]),
         );
         m
     }
@@ -493,7 +491,10 @@ vars.account = "checking"
         let rules = compile_kind_rules(&profile).unwrap();
         let matched = classify_scanned(&profile, &rules, &scanned("bank2000/stmt.pdf"));
         assert_eq!(matched.kind, "statement");
-        assert_eq!(matched.vars.get("bank").map(String::as_str), Some("bank2000"));
+        assert_eq!(
+            matched.vars.get("bank").map(String::as_str),
+            Some("bank2000")
+        );
         assert_eq!(
             matched.vars.get("account").map(String::as_str),
             Some("checking")

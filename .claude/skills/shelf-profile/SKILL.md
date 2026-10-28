@@ -44,7 +44,14 @@ heif = "heic"                                     #   tif→tiff, heif→heic, m
 tif  = "tiff"
 
 [kinds]                                           # canonical exts grouped by kind name
-photo = ["jpg", "png", "heic"]
+photo = ["jpg", "png", "heic"]                    # array: extensions only; dates from [metadata]
+
+[kinds.invoice]                                   # table: optional per-kind date config
+extensions = ["pdf"]
+date_sources = ["pdf:CreationDate", "filename", "mtime"]  # replaces [metadata].date_sources
+filename_date_patterns = ["%Y-%m-%d", "%Y%m%d"]   # replaces [metadata].filename_date_patterns
+# omit either date field to keep that [metadata] value
+# omit extensions when a [[kind_rule]] assigns this kind and it claims none
 
 # [[kind_rule]]                                   # optional; tried before [kinds]
 # kind = "invoice"                                # may be absent from [kinds]

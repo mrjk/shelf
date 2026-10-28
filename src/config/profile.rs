@@ -22,9 +22,10 @@ pub struct Profile {
     #[serde(default)]
     pub extensions: Extensions,
 
-    /// Map of kind-name (e.g. `"photo"`) to its canonical extensions.
+    /// Map of kind-name (e.g. `"photo"`) to its extensions and optional
+    /// date overrides. TOML accepts an array of extensions or a table.
     #[serde(default)]
-    pub kinds: BTreeMap<String, Vec<String>>,
+    pub kinds: BTreeMap<String, KindConfig>,
 
     /// More specific overlays. TOML key `[[kind_rule]]`. Empty keeps
     /// extension classification unchanged.
@@ -88,6 +89,76 @@ pub struct KindRule {
     /// Dotted keys such as `vars.bank = "bank2000"`. Not a match constraint.
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
+}
+
+/// One `[kinds]` entry.
+///
+/// TOML accepts a string array (extensions only) or a table. When
+/// `date_sources` or `filename_date_patterns` is `Some`, that list replaces
+/// the matching `[metadata]` field for this kind, including an explicit empty
+/// list. `None` keeps the profile default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "KindConfigDe")]
+#[non_exhaustive]
+pub struct KindConfig {
+    pub extensions: Vec<String>,
+    pub date_sources: Option<Vec<String>>,
+    pub filename_date_patterns: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum KindConfigDe {
+    Extensions(Vec<String>),
+    Table {
+        #[serde(default)]
+        extensions: Vec<String>,
+        #[serde(default)]
+        date_sources: Option<Vec<String>>,
+        #[serde(default)]
+        filename_date_patterns: Option<Vec<String>>,
+    },
+}
+
+impl From<KindConfigDe> for KindConfig {
+    fn from(value: KindConfigDe) -> Self {
+        match value {
+            KindConfigDe::Extensions(extensions) => Self {
+                extensions,
+                date_sources: None,
+                filename_date_patterns: None,
+            },
+            KindConfigDe::Table {
+                extensions,
+                date_sources,
+                filename_date_patterns,
+            } => Self {
+                extensions,
+                date_sources,
+                filename_date_patterns,
+            },
+        }
+    }
+}
+
+impl Profile {
+    /// `date_sources` for `kind`, or `[metadata].date_sources` when unset.
+    #[must_use]
+    pub fn date_sources_for(&self, kind: &str) -> &[String] {
+        self.kinds
+            .get(kind)
+            .and_then(|cfg| cfg.date_sources.as_deref())
+            .unwrap_or(&self.metadata.date_sources)
+    }
+
+    /// Filename date patterns for `kind`, or the `[metadata]` list when unset.
+    #[must_use]
+    pub fn filename_date_patterns_for(&self, kind: &str) -> &[String] {
+        self.kinds
+            .get(kind)
+            .and_then(|cfg| cfg.filename_date_patterns.as_deref())
+            .unwrap_or(&self.metadata.filename_date_patterns)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,8 +477,10 @@ filename  = "{yyyy}-{mm}-{dd}_{author}_{seq:04}"
         assert_eq!(p.filters.include.len(), 6);
         assert_eq!(p.filters.exclude.len(), 3);
         assert_eq!(p.extensions.canonical.get("jpeg").unwrap(), "jpg");
-        assert_eq!(p.kinds["photo"].len(), 6);
-        assert_eq!(p.kinds["raw"].len(), 9);
+        assert_eq!(p.kinds["photo"].extensions.len(), 6);
+        assert_eq!(p.kinds["raw"].extensions.len(), 9);
+        assert!(p.kinds["photo"].date_sources.is_none());
+        assert!(p.kinds["photo"].filename_date_patterns.is_none());
         assert_eq!(p.metadata.date_sources.len(), 4);
         assert_eq!(p.sequence.scope, SequenceScope::Day);
         assert_eq!(p.sequence.start, 1);
@@ -437,7 +510,7 @@ filename  = "{yyyy}-{mm}-{dd}_{author}_{seq:04}"
     fn parses_invoices_profile() {
         let p = parse_str(INVOICES_TOML);
         assert_eq!(p.inputs.len(), 1);
-        assert_eq!(p.kinds["invoice"], vec!["pdf"]);
+        assert_eq!(p.kinds["invoice"].extensions, vec!["pdf"]);
         assert_eq!(p.sequence.scope, SequenceScope::Month);
         assert_eq!(p.sequence.start, 1);
         assert_eq!(
@@ -446,6 +519,89 @@ filename  = "{yyyy}-{mm}-{dd}_{author}_{seq:04}"
         );
         assert_eq!(p.outputs[0].mode, OpMode::Move);
         assert_eq!(p.outputs[0].filename, "{yyyy}-{mm}-{dd}_{author}_{seq:04}");
+    }
+
+    const KIND_DATES_TOML: &str = r#"
+inputs = ["/in"]
+
+[kinds]
+photo = ["jpg"]
+
+[kinds.invoice]
+extensions = ["pdf"]
+date_sources = ["pdf:CreationDate", "filename", "mtime"]
+filename_date_patterns = ["%Y-%m-%d", "%Y%m%d"]
+
+[kinds.video]
+extensions = ["mp4"]
+date_sources = ["quicktime:CreationDate", "filename", "mtime"]
+
+[kinds.raw]
+extensions = ["cr3"]
+date_sources = []
+
+[metadata]
+date_sources = ["exif:DateTimeOriginal", "mtime"]
+filename_date_patterns = ["IMG_%Y%m%d_%H%M%S"]
+"#;
+
+    #[test]
+    fn parses_kind_date_config() {
+        let p = parse_str(KIND_DATES_TOML);
+
+        let photo = &p.kinds["photo"];
+        assert_eq!(photo.extensions, vec!["jpg"]);
+        assert!(photo.date_sources.is_none());
+        assert!(photo.filename_date_patterns.is_none());
+
+        let invoice = &p.kinds["invoice"];
+        assert_eq!(invoice.extensions, vec!["pdf"]);
+        assert_eq!(
+            invoice.date_sources.as_deref().unwrap(),
+            ["pdf:CreationDate", "filename", "mtime"]
+        );
+        assert_eq!(
+            invoice.filename_date_patterns.as_deref().unwrap(),
+            ["%Y-%m-%d", "%Y%m%d"]
+        );
+
+        let video = &p.kinds["video"];
+        assert_eq!(video.extensions, vec!["mp4"]);
+        assert!(video.date_sources.is_some());
+        assert!(video.filename_date_patterns.is_none());
+    }
+
+    #[test]
+    fn date_config_falls_back_per_field() {
+        let p = parse_str(KIND_DATES_TOML);
+        let meta_sources = ["exif:DateTimeOriginal", "mtime"];
+        let meta_patterns = ["IMG_%Y%m%d_%H%M%S"];
+
+        assert_eq!(p.date_sources_for("invoice")[0], "pdf:CreationDate");
+        assert_eq!(p.filename_date_patterns_for("invoice")[0], "%Y-%m-%d");
+
+        assert_eq!(p.date_sources_for("video")[0], "quicktime:CreationDate");
+        assert_eq!(
+            p.filename_date_patterns_for("video"),
+            meta_patterns.as_slice()
+        );
+
+        assert_eq!(p.date_sources_for("photo"), meta_sources.as_slice());
+        assert_eq!(
+            p.filename_date_patterns_for("photo"),
+            meta_patterns.as_slice()
+        );
+        assert_eq!(p.date_sources_for("other"), meta_sources.as_slice());
+        assert_eq!(
+            p.filename_date_patterns_for("missing"),
+            meta_patterns.as_slice()
+        );
+
+        assert!(p.date_sources_for("raw").is_empty());
+        assert_eq!(
+            p.filename_date_patterns_for("raw"),
+            meta_patterns.as_slice()
+        );
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Filename-based date extractor.
 //!
-//! Tries each pattern in `[metadata].filename_date_patterns` against the
-//! start of the file's stem, in declared order. The first successful
+//! Tries each pattern in the kind's `filename_date_patterns` (or
+//! `[metadata].filename_date_patterns` when the kind does not set them)
+//! against the start of the file's stem, in declared order. The first successful
 //! `strptime` parse wins, and any trailing stem text is ignored. Put a
 //! longer pattern before a shorter prefix of itself: the first hit wins,
 //! so an earlier short pattern drops the rest of the stem, including a
