@@ -31,6 +31,10 @@ pub enum ValidationError {
         template: String,
         reason: String,
     },
+    #[error("`[[kind_rule]]` #{index} is missing `kind`")]
+    KindRuleMissingKind { index: usize },
+    #[error("`[[kind_rule]]` #{index} (`{kind}`) must set `filename` or `parent`")]
+    KindRuleNotSpecific { index: usize, kind: String },
 }
 
 /// Crate-wide error type. Validation problems are collected into a single

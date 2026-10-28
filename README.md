@@ -168,6 +168,11 @@ exclude = ["**/cache/**"]
 photo = ["jpg", "png", "heic"]
 video = ["mp4", "mov"]
 
+# [[kind_rule]]            # optional; wins over [kinds] when it matches
+# kind = "invoice"
+# parent = ["**/invoices"] # directory relative to the input root
+# filename = ["INV_*"]
+
 [metadata]
 date_sources = ["exif:DateTimeOriginal", "quicktime:CreationDate", "filename", "mtime"]
 

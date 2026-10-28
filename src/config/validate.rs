@@ -24,6 +24,7 @@ pub fn validate(profile: &Profile) -> Vec<ValidationError> {
 
     check_unique_output_names(profile, &mut errors);
     check_kind_extension_uniqueness(profile, &mut errors);
+    check_kind_rules(profile, &mut errors);
     check_globs(profile, &mut errors);
     check_templates(profile, &mut errors);
 
@@ -62,6 +63,20 @@ fn check_kind_extension_uniqueness(profile: &Profile, errors: &mut Vec<Validatio
     }
 }
 
+fn check_kind_rules(profile: &Profile, errors: &mut Vec<ValidationError>) {
+    for (index, rule) in profile.kind_rules.iter().enumerate() {
+        if rule.kind.trim().is_empty() {
+            errors.push(ValidationError::KindRuleMissingKind { index });
+        }
+        if rule.filename.is_empty() && rule.parent.is_empty() {
+            errors.push(ValidationError::KindRuleNotSpecific {
+                index,
+                kind: rule.kind.clone(),
+            });
+        }
+    }
+}
+
 fn check_globs(profile: &Profile, errors: &mut Vec<ValidationError>) {
     let mut check = |patterns: &[String], location: String| {
         for pat in patterns {
@@ -77,6 +92,11 @@ fn check_globs(profile: &Profile, errors: &mut Vec<ValidationError>) {
 
     check(&profile.filters.include, "filters.include".into());
     check(&profile.filters.exclude, "filters.exclude".into());
+
+    for (index, rule) in profile.kind_rules.iter().enumerate() {
+        check(&rule.filename, format!("kind_rule[{index}].filename"));
+        check(&rule.parent, format!("kind_rule[{index}].parent"));
+    }
 
     for out in &profile.outputs {
         if let Some(patterns) = &out.match_ {

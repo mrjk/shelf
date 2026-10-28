@@ -18,7 +18,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::config::{DedupeScope, OnConflict, OnDuplicate, OpMode, Output, Profile};
 use crate::error::{Error, Result};
 use crate::hash::{hex, sha256_file};
-use crate::kind::classify_scanned;
+use crate::kind::{CompiledKindRules, classify_scanned, compile_kind_rules};
 use crate::metadata::{DateSource, Metadata, extract};
 use crate::progress::Progress;
 use crate::scan::ScannedFile;
@@ -144,10 +144,11 @@ pub fn plan(
     // pre-compute phase resolves cache hits in memory instead of through a
     // per-file SELECT.
     let cache = state.load_hash_cache()?;
+    let kind_rules = compile_kind_rules(profile)?;
 
     let computed: Vec<std::result::Result<Computed, HealthEntry>> = scanned
         .into_par_iter()
-        .map(|file| compute_one(profile, file, &cache))
+        .map(|file| compute_one(profile, &kind_rules, file, &cache))
         .collect();
 
     let mut ready: Vec<ReadyFile> = Vec::with_capacity(computed.len());
@@ -252,10 +253,11 @@ struct Computed {
 /// surfaced as [`HealthEntry`]s; nothing here aborts the planner.
 fn compute_one(
     profile: &Profile,
+    kind_rules: &CompiledKindRules,
     file: ScannedFile,
     cache: &HashMap<String, CachedFileEntry>,
 ) -> std::result::Result<Computed, HealthEntry> {
-    let classified = classify_scanned(profile, &file);
+    let classified = classify_scanned(profile, kind_rules, &file);
 
     let sha256 = match resolve_hash(&file, cache) {
         Ok(b) => b,

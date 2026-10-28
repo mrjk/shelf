@@ -346,6 +346,7 @@ mod dispatch_tests {
             filters: Filters::default(),
             extensions: Default::default(),
             kinds: Default::default(),
+            kind_rules: Vec::new(),
             metadata: MetadataCfg {
                 date_sources: date_sources.iter().map(|s| (*s).to_string()).collect(),
                 filename_date_patterns: patterns.iter().map(|s| (*s).to_string()).collect(),

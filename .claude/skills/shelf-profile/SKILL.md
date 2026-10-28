@@ -46,6 +46,12 @@ tif  = "tiff"
 [kinds]                                           # canonical exts grouped by kind name
 photo = ["jpg", "png", "heic"]
 
+# [[kind_rule]]                                   # optional; tried before [kinds]
+# kind = "invoice"                                # may be absent from [kinds]
+# filename = ["INV_*", "FACTURE_*"]               # file name, including extension
+# parent = ["**/invoices"]                        # parent path relative to the input root
+# extensions = ["pdf"]                            # canonical ext filter; does not own "pdf"
+
 [metadata]
 date_sources = ["exif:DateTimeOriginal", "quicktime:CreationDate", "filename", "mtime"]
 filename_date_patterns = ["IMG_%Y%m%d_%H%M%S"]    # strftime; start of stem; tried in order; longer pattern first
@@ -236,6 +242,7 @@ filename  = "{yyyy}-{mm}-{dd}_{seq:04}"
 - **Absolute paths** only in `inputs` and `output.path`. Relative paths are ambiguous and untested.
 - **`exclude` patterns** match the path relative to each input root. `**/cache/**` excludes any `cache` folder anywhere; `cache/*` only excludes top-level.
 - **`match_dir`** globs the file's directory relative to the input root. `bnc` matches only files directly in `bnc/`. `bnc/**` matches descendants such as `bnc/2024/` and does not match `bnc` itself. List both to take the folder and everything under it. Omitted or `[]` accepts every directory. `match` still sees only the filename.
+- **`[[kind_rule]]`** is checked before `[kinds]`. A rule must set `filename` or `parent` (or both). Patterns in one list are OR; fields on the same rule are AND. The matching rule with the most set fields wins, and equal counts keep file order. No match uses `[kinds]`, then `other`. `parent` is the directory containing the file, relative to the input root (`invoices/2024/a.pdf` has parent `invoices/2024`). A file in the input root has parent `.`. `invoices` matches only that top-level directory. `**/invoices` matches a directory named `invoices` at any depth. `extensions` filters the rule and is written in canonical form (`jpg`, not `jpeg`, unless `[extensions.canonical]` maps it).
 - **One workflow per profile.** Don't try to combine "photos" and "invoices" in one — different extractors, different filename conventions. Make two files.
 - **State DB is per-profile.** Renaming the profile filename creates a fresh DB; the old one still sits at `~/.local/share/shelf/<old-name>.db`. Mention this if the user is renaming.
 - **`{seq}` resets per scope.** With `scope = "day"`, day boundaries reset the counter — re-running on the same day continues numbering, the next day starts at 1.

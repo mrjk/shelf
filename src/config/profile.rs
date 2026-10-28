@@ -26,6 +26,11 @@ pub struct Profile {
     #[serde(default)]
     pub kinds: BTreeMap<String, Vec<String>>,
 
+    /// More specific overlays. TOML key `[[kind_rule]]`. Empty keeps
+    /// extension classification unchanged.
+    #[serde(default, rename = "kind_rule")]
+    pub kind_rules: Vec<KindRule>,
+
     #[serde(default)]
     pub metadata: Metadata,
 
@@ -63,6 +68,23 @@ pub struct Filters {
 pub struct Extensions {
     #[serde(default)]
     pub canonical: BTreeMap<String, String>,
+}
+
+/// A kind assigned when a file's name, parent directory, or both match.
+///
+/// `extensions` narrows the rule. It does not claim that extension in
+/// [`Profile::kinds`]. A rule with neither `filename` nor `parent` is
+/// rejected by validation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct KindRule {
+    pub kind: String,
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    #[serde(default)]
+    pub filename: Vec<String>,
+    #[serde(default)]
+    pub parent: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,6 +427,7 @@ filename  = "{yyyy}-{mm}-{dd}_{author}_{seq:04}"
         assert!(o.match_.is_none());
         assert!(o.match_dir.is_none());
         assert!(o.preserve_mtime, "preserve_mtime defaults to true");
+        assert!(p.kind_rules.is_empty());
     }
 
     #[test]
@@ -572,5 +595,138 @@ filename = "{yyyy}-{mm}"
                 .any(|e| matches!(e, crate::error::ValidationError::BadGlob { .. })),
             "expected BadGlob, got {errs:?}"
         );
+    }
+
+    #[test]
+    fn parses_kind_rules() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[kinds]
+document = ["pdf"]
+
+[[kind_rule]]
+kind = "invoice"
+parent = ["**/invoices"]
+
+[[kind_rule]]
+kind = "receipt"
+extensions = ["pdf"]
+filename = ["INV_*", "FACTURE_*"]
+parent = ["**/invoices"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p = parse_str(toml_str);
+        assert_eq!(p.kind_rules.len(), 2);
+        assert_eq!(p.kind_rules[0].kind, "invoice");
+        assert_eq!(p.kind_rules[0].parent, vec!["**/invoices"]);
+        assert!(p.kind_rules[0].filename.is_empty());
+        assert!(p.kind_rules[0].extensions.is_empty());
+        assert_eq!(p.kind_rules[1].kind, "receipt");
+        assert_eq!(p.kind_rules[1].extensions, vec!["pdf"]);
+        assert_eq!(p.kind_rules[1].filename, vec!["INV_*", "FACTURE_*"]);
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn kind_rule_extensions_do_not_conflict_with_kinds() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[kinds]
+document = ["pdf"]
+
+[[kind_rule]]
+kind = "invoice"
+extensions = ["pdf"]
+parent = ["**/invoices"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(
+            errs.is_empty(),
+            "rule extensions must not own the extension, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn kind_rule_missing_kind_is_validation_error() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = ""
+parent = ["**/invoices"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::KindRuleMissingKind { index: 0 }
+        )));
+    }
+
+    #[test]
+    fn extensions_only_kind_rule_is_validation_error() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = "invoice"
+extensions = ["pdf"]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::KindRuleNotSpecific { index: 0, kind } if kind == "invoice"
+        )));
+    }
+
+    #[test]
+    fn kind_rule_bad_glob_is_validation_error() {
+        let toml_str = r#"
+inputs = ["/tmp/i"]
+
+[[kind_rule]]
+kind = "invoice"
+filename = ["*["]
+
+[[output]]
+name = "lib"
+path = "/tmp/o"
+directory = "{yyyy}"
+filename = "{yyyy}-{mm}"
+"#;
+        let p: Profile = toml::from_str(toml_str).unwrap();
+        let errs = crate::config::validate::validate(&p);
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            crate::error::ValidationError::BadGlob { location, .. } if location == "kind_rule[0].filename"
+        )));
     }
 }
