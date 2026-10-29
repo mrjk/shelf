@@ -48,7 +48,7 @@ photo = ["jpg", "png", "heic"]
 
 [metadata]
 date_sources = ["exif:DateTimeOriginal", "quicktime:CreationDate", "filename", "mtime"]
-filename_date_patterns = ["IMG_%Y%m%d_%H%M%S"]    # strftime; start of stem; tried in order; longer pattern first
+filename_date_patterns = ["IMG_%Y%m%d_%H%M%S"]    # strftime; start of stem; tried in order; longer pattern first; no day uses the 1st and yields to a later real day
 
 [sequence]
 scope = "day"                                     # global | year | month | day | folder
